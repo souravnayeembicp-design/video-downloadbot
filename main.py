@@ -3,7 +3,6 @@ import tempfile
 import random
 import subprocess
 from uuid import uuid4
-import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from yt_dlp import YoutubeDL
@@ -11,10 +10,10 @@ from PIL import Image
 
 TOKEN = os.getenv("BOT_TOKEN")  # আপনার বট টোকেন
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # ওয়েবহুক URL
-REMOVE_BG_API_KEY = os.getenv("REMOVE_BG_API_KEY")  # remove.bg API কী
 
 user_sessions = {}
 
+# ফিল্টার লিস্ট (blur সহ)
 FFMPEG_FILTERS = [
     "hue=s=0",          # কালো-সাদা
     "eq=contrast=1.5",  # কনট্রাস্ট বাড়ানো
@@ -34,22 +33,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_sessions[user_id] = {"video_url": url}
     await update.message.reply_text("🔗 লিঙ্ক পেয়েছি। এবার লোগো পাঠাও (ইমেজ পাঠাও)।")
 
-def remove_bg_api(input_path, output_path):
-    with open(input_path, 'rb') as image_file:
-        response = requests.post(
-            'https://api.remove.bg/v1.0/removebg',
-            files={'image_file': image_file},
-            data={'size': 'auto'},
-            headers={'X-Api-Key': REMOVE_BG_API_KEY},
-        )
-        if response.status_code == requests.codes.ok:
-            with open(output_path, 'wb') as out:
-                out.write(response.content)
-            return True
-        else:
-            print("Remove.bg API Error:", response.text)
-            return False
-
 async def handle_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id not in user_sessions or "video_url" not in user_sessions[user_id]:
@@ -60,14 +43,7 @@ async def handle_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logo_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}.png")
     await logo_file.download_to_drive(logo_path)
 
-    # ব্যাকগ্রাউন্ড রিমুভ
-    logo_no_bg_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}_no_bg.png")
-    success = remove_bg_api(logo_path, logo_no_bg_path)
-    if not success:
-        await update.message.reply_text("⚠️ ব্যাকগ্রাউন্ড রিমুভ করা সম্ভব হয়নি। অন্য লোগো পাঠান।")
-        return
-
-    user_sessions[user_id]["logo_path"] = logo_no_bg_path
+    user_sessions[user_id]["logo_path"] = logo_path
 
     keyboard = [
         [
@@ -113,11 +89,12 @@ async def process_video(user_id, query):
     output_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}.mp4")
 
     try:
+        # ভিডিও ডাউনলোড
         ydl_opts = {"outtmpl": video_path, "format": "mp4/best"}
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
 
-        # ভিডিওর রেজুলেশন বের করা
+        # ভিডিও রেজুলেশন বের করা
         probe_cmd = [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
             "-show_entries", "stream=width,height",
@@ -142,6 +119,7 @@ async def process_video(user_id, query):
         }
         pos = positions.get(position, "main_w-overlay_w-20:main_h-overlay_h-20")
 
+        # ফিল্টার + লোগো + ওয়াটারমার্ক
         filter_complex = (
             f"[0:v]{selected_filter}[v];"
             f"[v][1:v]overlay={pos},"
