@@ -7,11 +7,15 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from yt_dlp import YoutubeDL
 from moviepy.editor import VideoFileClip, CompositeVideoClip, ImageClip, vfx
 from PIL import Image
+import imageio_ffmpeg
 
-TOKEN = os.getenv("BOT_TOKEN")  # Railway config vars এ সেট করো
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Railway ডোমেইন + /webhook path
+# ffmpeg path fix for Render
+os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
 
-# সেশন মেমরি: user_id অনুযায়ী ডেটা রাখার জন্য
+TOKEN = os.getenv("BOT_TOKEN")  # Render Config vars এ সেট করো
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Render URL
+
+# সেশন ডেটা রাখার জন্য
 user_sessions = {}
 
 # Random filters
@@ -24,9 +28,11 @@ def apply_random_filter(clip):
     ]
     return random.choice(filters)(clip)
 
+# /start কমান্ড
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 হ্যালো! আমাকে ভিডিও লিঙ্ক পাঠাও।")
 
+# লিঙ্ক হ্যান্ডলার
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     user_id = update.message.from_user.id
@@ -36,6 +42,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🔗 লিঙ্ক পেয়েছি। এবার লোগো পাঠাও (ইমেজ পাঠাও)।")
 
+# লোগো হ্যান্ডলার
 async def handle_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id not in user_sessions or "video_url" not in user_sessions[user_id]:
@@ -63,6 +70,7 @@ async def handle_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("লোগো কোথায় বসাতে চাও?", reply_markup=reply_markup)
 
+# পজিশন হ্যান্ডলার
 async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -78,6 +86,7 @@ async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # প্রসেস শুরু
     await process_video(user_id, query)
 
+# ভিডিও প্রসেস ফাংশন
 async def process_video(user_id, query):
     data = user_sessions[user_id]
     video_url = data["video_url"]
@@ -142,3 +151,4 @@ if __name__ == "__main__":
         url_path=TOKEN,
         webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
     )
+
