@@ -1,35 +1,29 @@
 import os
 import tempfile
 import random
+import subprocess
 from uuid import uuid4
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from yt_dlp import YoutubeDL
-from moviepy.editor import VideoFileClip, CompositeVideoClip, ImageClip, vfx
 from PIL import Image
 
-# Bot token & Webhook URL (Render/Cyclic/Railway environment variables)
 TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-# In-memory session
 user_sessions = {}
 
-# Random filters list
-def apply_random_filter(clip):
-    filters = [
-        lambda c: c.fx(vfx.blackwhite),
-        lambda c: c.fx(vfx.colorx, 1.3),
-        lambda c: c.fx(vfx.lum_contrast, lum=10, contrast=50),
-        lambda c: c.fx(vfx.mirror_x),
-    ]
-    return random.choice(filters)(clip)
+# FFmpeg filters
+FFMPEG_FILTERS = [
+    "hue=s=0",             # Black & White
+    "eq=contrast=1.5",     # High Contrast
+    "hue=h=90",            # Color shift
+    "negate"               # Invert colors
+]
 
-# Start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 হ্যালো! আমাকে ভিডিও লিঙ্ক পাঠাও।")
 
-# Handle video link
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     user_id = update.message.from_user.id
@@ -37,20 +31,17 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_sessions[user_id] = {"video_url": url}
     await update.message.reply_text("🔗 লিঙ্ক পেয়েছি। এবার লোগো পাঠাও (ইমেজ পাঠাও)।")
 
-# Handle logo
 async def handle_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id not in user_sessions or "video_url" not in user_sessions[user_id]:
         await update.message.reply_text("⚠️ আগে ভিডিও লিঙ্ক পাঠাও।")
         return
 
-    # Save logo to temp
     logo_file = await update.message.photo[-1].get_file()
     logo_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}.png")
     await logo_file.download_to_drive(logo_path)
     user_sessions[user_id]["logo_path"] = logo_path
 
-    # Position buttons
     keyboard = [
         [
             InlineKeyboardButton("উপর বাঁ", callback_data="top_left"),
@@ -64,7 +55,6 @@ async def handle_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("লোগো কোথায় বসাতে চাও?", reply_markup=reply_markup)
 
-# Handle position selection
 async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -77,10 +67,8 @@ async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_sessions[user_id]["position"] = query.data
     await query.edit_message_text("⏳ ভিডিও প্রসেস হচ্ছে...")
 
-    # Process video
     await process_video(user_id, query)
 
-# Video processing
 async def process_video(user_id, query):
     data = user_sessions[user_id]
     video_url = data["video_url"]
@@ -90,49 +78,45 @@ async def process_video(user_id, query):
     video_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}.mp4")
     output_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}.mp4")
 
-    # Download video with audio
-    ydl_opts = {
-        "outtmpl": video_path,
-        "format": "bestvideo+bestaudio/best"
-    }
+    # Download video with yt-dlp
+    ydl_opts = {"outtmpl": video_path, "format": "bestvideo+bestaudio/best"}
     with YoutubeDL(ydl_opts) as ydl:
         ydl.download([video_url])
 
-    # Load video clip
-    clip = VideoFileClip(video_path)
-    clip = apply_random_filter(clip)
-    clip = clip.set_audio(clip.audio)  # ensure audio preserved
+    # Random filter
+    selected_filter = random.choice(FFMPEG_FILTERS)
 
-    # Prepare logo
-    logo = Image.open(logo_path).convert("RGBA")
-    logo_clip = ImageClip(logo_path).set_duration(clip.duration).resize(height=80)
+    # Determine position
+    positions = {
+        "top_left": "(10,10)",
+        "top_right": "(main_w-overlay_w-10,10)",
+        "bottom_left": "(10,main_h-overlay_h-10)",
+        "bottom_right": "(main_w-overlay_w-10,main_h-overlay_h-10)"
+    }
+    pos = positions[position]
 
-    # Positioning
-    margin = 10
-    if position == "top_left":
-        logo_clip = logo_clip.set_pos((margin, margin))
-    elif position == "top_right":
-        logo_clip = logo_clip.set_pos((clip.w - logo_clip.w - margin, margin))
-    elif position == "bottom_left":
-        logo_clip = logo_clip.set_pos((margin, clip.h - logo_clip.h - margin))
-    elif position == "bottom_right":
-        logo_clip = logo_clip.set_pos((clip.w - logo_clip.w - margin, clip.h - logo_clip.h - margin))
+    # FFmpeg command: Apply filter + overlay logo
+    cmd = [
+        "ffmpeg",
+        "-i", video_path,
+        "-i", logo_path,
+        "-filter_complex",
+        f"[0:v]{selected_filter}[v];[v][1:v]overlay={pos}",
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        "-preset", "ultrafast",
+        "-y", output_path
+    ]
+    subprocess.run(cmd, check=True)
 
-    # Combine and export
-    final = CompositeVideoClip([clip, logo_clip])
-    final.write_videofile(output_path, codec="libx264", audio_codec="aac", threads=4, preset="ultrafast")
-
-    # Send back video
     await query.message.reply_video(video=open(output_path, "rb"))
 
-    # Cleanup temp files
+    # Cleanup
     for path in [video_path, output_path, logo_path]:
         if os.path.exists(path):
             os.remove(path)
-
     del user_sessions[user_id]
 
-# Main application
 if __name__ == "__main__":
     app = Application.builder().token(TOKEN).build()
 
@@ -141,7 +125,6 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, handle_logo))
     app.add_handler(CallbackQueryHandler(handle_position))
 
-    # Webhook for deployment
     port = int(os.environ.get("PORT", 8080))
     app.run_webhook(
         listen="0.0.0.0",
