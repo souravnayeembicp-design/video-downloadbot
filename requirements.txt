@@ -1,5 +1,8 @@
 python-telegram-bot[webhooks]==21.4
 yt-dlp
 Pillow
+mediapipe
+opencv-python-headless
+numpy
 
 
