@@ -3,23 +3,25 @@ import tempfile
 import random
 import subprocess
 from uuid import uuid4
+import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from yt_dlp import YoutubeDL
 from PIL import Image
-from rembg import remove
 
-TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+TOKEN = os.getenv("BOT_TOKEN")  # আপনার বট টোকেন
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # ওয়েবহুক URL
+REMOVE_BG_API_KEY = os.getenv("REMOVE_BG_API_KEY")  # remove.bg API কী
 
 user_sessions = {}
 
-# FFmpeg filters
 FFMPEG_FILTERS = [
-    "hue=s=0",             # Black & White
-    "eq=contrast=1.5",     # High Contrast
-    "hue=h=90",            # Color shift
-    "negate"               # Invert colors
+    "hue=s=0",          # কালো-সাদা
+    "eq=contrast=1.5",  # কনট্রাস্ট বাড়ানো
+    "hue=h=90",         # কালার শিফট
+    "negate",           # কালার ইনভার্ট
+    "boxblur=10:1",     # ব্লার (box blur)
+    "gblur=sigma=5"     # ব্লার (Gaussian blur)
 ]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -32,22 +34,40 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_sessions[user_id] = {"video_url": url}
     await update.message.reply_text("🔗 লিঙ্ক পেয়েছি। এবার লোগো পাঠাও (ইমেজ পাঠাও)।")
 
+def remove_bg_api(input_path, output_path):
+    with open(input_path, 'rb') as image_file:
+        response = requests.post(
+            'https://api.remove.bg/v1.0/removebg',
+            files={'image_file': image_file},
+            data={'size': 'auto'},
+            headers={'X-Api-Key': REMOVE_BG_API_KEY},
+        )
+        if response.status_code == requests.codes.ok:
+            with open(output_path, 'wb') as out:
+                out.write(response.content)
+            return True
+        else:
+            print("Remove.bg API Error:", response.text)
+            return False
+
 async def handle_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id not in user_sessions or "video_url" not in user_sessions[user_id]:
-        await update.message.reply_text("⚠️ আগে ভিডিও লিঙ্ক পাঠাও।")
+        await update.message.reply_text("⚠️ আগে ভিডিও লিঙ্ক পাঠান।")
         return
 
     logo_file = await update.message.photo[-1].get_file()
     logo_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}.png")
     await logo_file.download_to_drive(logo_path)
 
-    # Background remove using rembg
-    input_image = Image.open(logo_path)
-    output_image = remove(input_image)
-    output_image.save(logo_path)
+    # ব্যাকগ্রাউন্ড রিমুভ
+    logo_no_bg_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}_no_bg.png")
+    success = remove_bg_api(logo_path, logo_no_bg_path)
+    if not success:
+        await update.message.reply_text("⚠️ ব্যাকগ্রাউন্ড রিমুভ করা সম্ভব হয়নি। অন্য লোগো পাঠান।")
+        return
 
-    user_sessions[user_id]["logo_path"] = logo_path
+    user_sessions[user_id]["logo_path"] = logo_no_bg_path
 
     keyboard = [
         [
@@ -68,11 +88,10 @@ async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     if user_id not in user_sessions or "logo_path" not in user_sessions[user_id]:
-        await query.edit_message_text("⚠️ আগে ভিডিও লিঙ্ক আর লোগো পাঠাও।")
+        await query.edit_message_text("⚠️ আগে ভিডিও লিঙ্ক আর লোগো পাঠান।")
         return
 
     user_sessions[user_id]["position"] = query.data
-    # Randomly select a filter
     user_sessions[user_id]["filter"] = random.choice(FFMPEG_FILTERS)
 
     await query.edit_message_text("⏳ ভিডিও প্রসেস হচ্ছে...")
@@ -82,7 +101,7 @@ async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_video(user_id, query):
     data = user_sessions.get(user_id)
     if not data:
-        await query.message.reply_text("সেশন টাইম আউট হয়েছে, আবার চেষ্টা করুন।")
+        await query.message.reply_text("সেশন টাইমআউট হয়েছে, আবার চেষ্টা করুন।")
         return
 
     video_url = data.get("video_url")
@@ -94,13 +113,11 @@ async def process_video(user_id, query):
     output_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}.mp4")
 
     try:
-        print(f"[{user_id}] ভিডিও ডাউনলোড শুরু হচ্ছে...")
         ydl_opts = {"outtmpl": video_path, "format": "mp4/best"}
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
-        print(f"[{user_id}] ভিডিও ডাউনলোড শেষ হয়েছে: {video_path}")
 
-        # ভিডিও resolution বের করা
+        # ভিডিওর রেজুলেশন বের করা
         probe_cmd = [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
             "-show_entries", "stream=width,height",
@@ -108,16 +125,14 @@ async def process_video(user_id, query):
         ]
         probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
         width, height = map(int, probe_result.stdout.strip().split('x'))
-        print(f"[{user_id}] ভিডিও রেজুলেশন: {width}x{height}")
 
-        # লোগো রিসাইজ করা (ভিডিওর ১০% চওড়া)
+        # লোগো রিসাইজ (ভিডিওর ১০% চওড়া)
         max_logo_width = max(50, int(width * 0.1))
         img = Image.open(logo_path).convert("RGBA")
         aspect_ratio = img.height / img.width
         new_height = int(max_logo_width * aspect_ratio)
         img = img.resize((max_logo_width, new_height))
         img.save(logo_path, "PNG")
-        print(f"[{user_id}] লোগো রিসাইজ শেষ")
 
         positions = {
             "top_left": "20:20",
@@ -147,32 +162,20 @@ async def process_video(user_id, query):
             "-y", output_path
         ]
 
-        print(f"[{user_id}] FFmpeg প্রোসেস শুরু হচ্ছে...")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)  # ১০ মিনিট timeout
-        print(f"[{user_id}] FFmpeg প্রোসেস শেষ হয়েছে, রিটার্ন কোড: {result.returncode}")
+        subprocess.run(cmd, check=True, timeout=600)
 
-        if result.returncode != 0:
-            print(f"[{user_id}] FFmpeg error: {result.stderr}")
-            await query.message.reply_text(f"ভিডিও প্রোসেসিংয়ে সমস্যা হয়েছে:\n{result.stderr}")
-            return
-
-        size_mb = os.path.getsize(output_path) / (1024*1024)
-        print(f"[{user_id}] আউটপুট ভিডিও সাইজ: {size_mb:.2f} MB")
-
+        size_mb = os.path.getsize(output_path) / (1024 * 1024)
         if size_mb > 50:
-            await query.message.reply_text("ভিডিওর সাইজ ৫০ MB এর বেশি, তাই পাঠানো সম্ভব হচ্ছেনা।")
+            await query.message.reply_text("ভিডিওর সাইজ ৫০ MB এর বেশি, তাই পাঠানো সম্ভব হচ্ছে না।")
             return
 
         with open(output_path, "rb") as video_file:
             await query.message.reply_video(video=video_file)
 
-        print(f"[{user_id}] ভিডিও সফলভাবে পাঠানো হয়েছে।")
-
     except subprocess.TimeoutExpired:
-        await query.message.reply_text("ভিডিও প্রোসেসিং টাইমআউট হয়েছে, অনুগ্রহ করে ছোট ভিডিও পাঠান।")
+        await query.message.reply_text("ভিডিও প্রসেসিং টাইমআউট হয়েছে, অনুগ্রহ করে ছোট ভিডিও পাঠান।")
     except Exception as e:
-        print(f"[{user_id}] Exception: {e}")
-        await query.message.reply_text(f"ভিডিও প্রোসেসিংয়ে সমস্যা হয়েছে: {e}")
+        await query.message.reply_text(f"ভিডিও প্রসেসিংয়ে সমস্যা হয়েছে: {e}")
     finally:
         for path in [video_path, output_path, logo_path]:
             if os.path.exists(path):
