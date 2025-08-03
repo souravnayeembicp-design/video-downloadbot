@@ -1,7 +1,4 @@
 import os
-import cv2
-import mediapipe as mp
-import numpy as np
 import tempfile
 import random
 import subprocess
@@ -11,20 +8,18 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from yt_dlp import YoutubeDL
 from PIL import Image
 
-TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+TOKEN = os.getenv("BOT_TOKEN")  # Render env এ সেট করতে হবে
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Render env এ সেট করতে হবে
 
 user_sessions = {}
 
-# Color filters (no blur here, blur handled separately)
+# শুধুমাত্র color ফিল্টার (blur বাদ)
 FFMPEG_FILTERS = [
     "hue=s=0",          # Black & White
     "eq=contrast=1.5",  # High Contrast
     "hue=h=90",         # Color shift
     "negate"            # Invert colors
 ]
-
-mp_selfie_segmentation = mp.solutions.selfie_segmentation
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 হ্যালো! আমাকে ভিডিও লিঙ্ক পাঠাও।")
@@ -77,33 +72,6 @@ async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await process_video(user_id, query)
 
-def apply_background_blur(input_video, output_video):
-    cap = cv2.VideoCapture(input_video)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_video, fourcc, fps, (width, height))
-
-    with mp_selfie_segmentation.SelfieSegmentation(model_selection=1) as selfie_seg:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            result = selfie_seg.process(rgb_frame)
-            mask = result.segmentation_mask > 0.5
-
-            blurred = cv2.GaussianBlur(frame, (55, 55), 0)
-            combined = np.where(mask[..., None], frame, blurred)
-
-            out.write(combined)
-
-    cap.release()
-    out.release()
-
 async def process_video(user_id, query):
     data = user_sessions.get(user_id)
     if not data:
@@ -116,7 +84,6 @@ async def process_video(user_id, query):
     selected_filter = data.get("filter")
 
     video_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}.mp4")
-    blurred_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}.mp4")
     output_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}.mp4")
 
     try:
@@ -125,14 +92,11 @@ async def process_video(user_id, query):
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
 
-        # Step 1: Apply background blur
-        apply_background_blur(video_path, blurred_path)
-
         # ভিডিও রেজুলেশন বের করা
         probe_cmd = [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
             "-show_entries", "stream=width,height",
-            "-of", "csv=s=x:p=0", blurred_path
+            "-of", "csv=s=x:p=0", video_path
         ]
         probe_result = subprocess.run(probe_cmd, capture_output=True, text=True)
         width, height = map(int, probe_result.stdout.strip().split('x'))
@@ -164,7 +128,7 @@ async def process_video(user_id, query):
 
         cmd = [
             "ffmpeg",
-            "-i", blurred_path,
+            "-i", video_path,
             "-i", logo_path,
             "-filter_complex", filter_complex,
             "-c:v", "libx264",
@@ -189,7 +153,7 @@ async def process_video(user_id, query):
     except Exception as e:
         await query.message.reply_text(f"ভিডিও প্রসেসিংয়ে সমস্যা হয়েছে: {e}")
     finally:
-        for path in [video_path, blurred_path, output_path, logo_path]:
+        for path in [video_path, output_path, logo_path]:
             if os.path.exists(path):
                 os.remove(path)
         if user_id in user_sessions:
