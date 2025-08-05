@@ -8,18 +8,19 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from yt_dlp import YoutubeDL
 from PIL import Image
 
-TOKEN = os.getenv("BOT_TOKEN")  # Render env এ সেট করতে হবে
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Render env এ সেট করতে হবে
+TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 user_sessions = {}
 
-# শুধুমাত্র color ফিল্টার (blur বাদ)
-FFMPEG_FILTERS = [
-    "hue=s=0",          # Black & White
-    "eq=contrast=1.5",  # High Contrast
-    "hue=h=90",         # Color shift
-    "negate"            # Invert colors
-]
+# Fixed brighten filter
+FIXED_FILTER = "eq=brightness=0.1:contrast=1.2:saturation=1.3"
+
+# Video crop+zoom parameters (80% center crop)
+CROP_W = "iw*0.8"
+CROP_H = "ih*0.8"
+CROP_X = "iw*0.1"
+CROP_Y = "ih*0.1"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 হ্যালো! আমাকে ভিডিও লিঙ্ক পাঠাও।")
@@ -66,8 +67,6 @@ async def handle_position(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_sessions[user_id]["position"] = query.data
-    user_sessions[user_id]["filter"] = random.choice(FFMPEG_FILTERS)
-
     await query.edit_message_text("⏳ ভিডিও প্রসেস হচ্ছে...")
 
     await process_video(user_id, query)
@@ -81,7 +80,6 @@ async def process_video(user_id, query):
     video_url = data.get("video_url")
     logo_path = data.get("logo_path")
     position = data.get("position")
-    selected_filter = data.get("filter")
 
     video_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}.mp4")
     output_path = os.path.join(tempfile.gettempdir(), f"{uuid4()}.mp4")
@@ -92,7 +90,7 @@ async def process_video(user_id, query):
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
 
-        # ভিডিও রেজুলেশন বের করা
+        # ভিডিওর সাইজ বের করা
         probe_cmd = [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
             "-show_entries", "stream=width,height",
@@ -117,13 +115,37 @@ async def process_video(user_id, query):
         }
         pos = positions.get(position, "main_w-overlay_w-20:main_h-overlay_h-20")
 
-        # ফিল্টার + লোগো + ওয়াটারমার্ক
+        # Random speed 1.7 - 2.0
+        speed = round(random.uniform(1.7, 2.0), 2)
+        setpts = 1 / speed
+
+        # FFmpeg filter_complex (crop, brighten, speed, fps)
+        video_filters = (
+            f"crop={CROP_W}:{CROP_H}:{CROP_X}:{CROP_Y},"
+            f"{FIXED_FILTER},"
+            f"setpts={setpts}*PTS,"
+            "fps=23.97"
+        )
+
+        # Audio filters (pitch, denoise, equalizer, ducking, resample)
+        audio_filters = (
+            "asetrate=44100*2.0,aresample=44100,"
+            "afftdn,"
+            "equalizer=f=100:t=h:width=200:g=-1,"
+            "equalizer=f=1000:t=h:width=200:g=2,"
+            "equalizer=f=5000:t=h:width=200:g=-2,"
+            "volume=0.1"
+        )
+
+        # Filter complex for video and overlay logo + watermark text
         filter_complex = (
-            f"[0:v]{selected_filter}[v];"
+            f"[0:v]{video_filters}[v];"
             f"[v][1:v]overlay={pos},"
             "drawtext=text='Power by BICP Team':"
             "fontcolor=white:fontsize=24:borderw=2:bordercolor=black:"
-            "x=w-tw-20:y=h-th-20"
+            "x=w-tw-20:y=h-th-20,"
+            "drawtext=text='Your Title Here':"
+            "fontcolor=yellow:fontsize=36:x=(w-text_w)/2:y=20"
         )
 
         cmd = [
@@ -131,14 +153,18 @@ async def process_video(user_id, query):
             "-i", video_path,
             "-i", logo_path,
             "-filter_complex", filter_complex,
+            "-map", "[v]",
+            "-map", "0:a",
             "-c:v", "libx264",
-            "-c:a", "aac",
+            "-b:v", "2000k",
             "-preset", "veryfast",
-            "-crf", "28",
+            "-crf", "23",
+            "-r", "23.97",
+            "-filter:a", audio_filters,
             "-y", output_path
         ]
 
-        subprocess.run(cmd, check=True, timeout=600)
+        subprocess.run(cmd, check=True, timeout=900)
 
         size_mb = os.path.getsize(output_path) / (1024 * 1024)
         if size_mb > 50:
