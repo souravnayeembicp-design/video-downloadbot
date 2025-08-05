@@ -13,10 +13,9 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 user_sessions = {}
 
-# Fixed brighten filter
 FIXED_FILTER = "eq=brightness=0.1:contrast=1.2:saturation=1.3"
 
-# Video crop+zoom parameters (80% center crop)
+# Crop parameters (80% center crop)
 CROP_W = "iw*0.8"
 CROP_H = "ih*0.8"
 CROP_X = "iw*0.1"
@@ -119,15 +118,7 @@ async def process_video(user_id, query):
         speed = round(random.uniform(1.7, 2.0), 2)
         setpts = 1 / speed
 
-        # FFmpeg filter_complex (crop, brighten, speed, fps)
-        video_filters = (
-            f"crop={CROP_W}:{CROP_H}:{CROP_X}:{CROP_Y},"
-            f"{FIXED_FILTER},"
-            f"setpts={setpts}*PTS,"
-            "fps=23.97"
-        )
-
-        # Audio filters (pitch, denoise, equalizer, ducking, resample)
+        # Audio filters
         audio_filters = (
             "asetrate=44100*2.0,aresample=44100,"
             "afftdn,"
@@ -137,15 +128,15 @@ async def process_video(user_id, query):
             "volume=0.1"
         )
 
-        # Filter complex for video and overlay logo + watermark text
+        # Filter complex with proper chaining (overlay + drawtext)
         filter_complex = (
-            f"[0:v]{video_filters}[v];"
-            f"[v][1:v]overlay={pos},"
-            "drawtext=text='Power by BICP Team':"
-            "fontcolor=white:fontsize=24:borderw=2:bordercolor=black:"
-            "x=w-tw-20:y=h-th-20,"
-            "drawtext=text='Your Title Here':"
-            "fontcolor=yellow:fontsize=36:x=(w-text_w)/2:y=20"
+            f"[0:v]crop={CROP_W}:{CROP_H}:{CROP_X}:{CROP_Y},"
+            f"{FIXED_FILTER},"
+            f"setpts={setpts}*PTS,"
+            "fps=23.97[v];"
+            f"[v][1:v]overlay={pos}[v1];"
+            "[v1]drawtext=text='Power by BICP Team':fontcolor=white:fontsize=24:borderw=2:bordercolor=black:x=w-tw-20:y=h-th-20,"
+            "drawtext=text='Your Title Here':fontcolor=yellow:fontsize=36:x=(w-text_w)/2:y=20[v2]"
         )
 
         cmd = [
@@ -153,7 +144,7 @@ async def process_video(user_id, query):
             "-i", video_path,
             "-i", logo_path,
             "-filter_complex", filter_complex,
-            "-map", "[v]",
+            "-map", "[v2]",
             "-map", "0:a",
             "-c:v", "libx264",
             "-b:v", "2000k",
