@@ -118,9 +118,11 @@ async def process_video(user_id, query):
         speed = round(random.uniform(1.7, 2.0), 2)
         setpts = 1 / speed
 
-        # Audio filters
+        # atempo filter দুইবার প্রয়োগ (vocoder এর মতো দ্রুত ভয়েস কমাতে)
+        atempo_val = speed ** 0.5
+
         audio_filters = (
-            "asetrate=44100*2.0,aresample=44100,"
+            f"atempo={atempo_val:.2f},atempo={atempo_val:.2f},"
             "afftdn,"
             "equalizer=f=100:t=h:width=200:g=-1,"
             "equalizer=f=1000:t=h:width=200:g=2,"
@@ -128,7 +130,7 @@ async def process_video(user_id, query):
             "volume=0.1"
         )
 
-        # Filter complex with proper chaining (overlay + drawtext)
+        # Filter complex with proper chaining (crop + filter + speed + fps + overlay + text)
         filter_complex = (
             f"[0:v]crop={CROP_W}:{CROP_H}:{CROP_X}:{CROP_Y},"
             f"{FIXED_FILTER},"
